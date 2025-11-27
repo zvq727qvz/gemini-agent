@@ -6,67 +6,97 @@ from dotenv import load_dotenv
 
 from prompts import system_prompt
 from call_function import call_function, available_functions
+from config import MAX_LOOPS
+
+messages = []
 
 
 def main():
-    load_dotenv()
+    try:
+        load_dotenv()
+        loop_count = 0
 
-    verbose = "--verbose" in sys.argv
-    args = []
-    for arg in sys.argv[1:]:
-        if not arg.startswith("--"):
-            args.append(arg)
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
 
-    if not args:
-        print("AI Code Assistant")
-        print('\nUsage: python main.py "your prompt here" [--verbose]')
-        print('Example: python main.py "How do I fix the calculator?"')
-        sys.exit(1)
+        user_prompt, verbose = get_user_prompt()
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key)
+        messages.append(
+            types.Content(role="user", parts=[types.Part(text=user_prompt)])
+        )
 
-    user_prompt = " ".join(args)
+        while True:
+            loop_count += 1
+            if loop_count >= MAX_LOOPS:
+                print("Max loop count reached. Goodbye")
+                sys.exit(1)
 
-    if verbose:
-        print(f"User prompt: {user_prompt}\n")
+            final_response = generate_content(client, verbose)
 
-    messages = [
-        types.Content(role="user", parts=[types.Part(text=user_prompt)]),
-    ]
+            if final_response:
+                print(f"Model: {final_response}")
+                break
 
-    generate_content(client, messages, verbose)
+    except Exception as e:
+        return f"Error: during main runtime: {e}"
 
 
-def generate_content(client, messages, verbose):
-    response = client.models.generate_content(
-        model="gemini-2.0-flash-001",
-        contents=messages,
-        config=types.GenerateContentConfig(
-            tools=[available_functions], system_instruction=system_prompt
-        ),
-    )
-    if verbose:
-        print("Prompt tokens:", response.usage_metadata.prompt_token_count)
-        print("Response tokens:", response.usage_metadata.candidates_token_count)
+def get_user_prompt():
+    try:
+        verbose = "--verbose" in sys.argv
+        args = []
+        for arg in sys.argv[1:]:
+            if not arg.startswith("--"):
+                args.append(arg)
 
-    if not response.function_calls:
-        return response.text
+        if not args:
+            print("AI Code Assistant")
+            print('\nUsage: python main.py "your prompt here" [--verbose]')
+            print('Example: python main.py "How do I fix the calculator?"')
+            sys.exit(1)
 
-    function_responses = []
-    for function_call_part in response.function_calls:
-        function_call_result = call_function(function_call_part, verbose)
-        if (
-            not function_call_result.parts
-            or not function_call_result.parts[0].function_response
-        ):
-            raise Exception("empty function call result")
+        user_prompt = " ".join(args)
+
+        print(f"User: {user_prompt}")
+
+        return user_prompt, verbose
+    except Exception as e:
+        return f"Error: getting user_prompt: {e}"
+
+
+def generate_content(client, verbose):
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-001",
+            contents=messages,
+            config=types.GenerateContentConfig(
+                tools=[available_functions], system_instruction=system_prompt
+            ),
+        )
         if verbose:
-            print(f"-> {function_call_result.parts[0].function_response.response}")
-        function_responses.append(function_call_result.parts[0])
+            print("Prompt tokens:", response.usage_metadata.prompt_token_count)
+            print("Response tokens:", response.usage_metadata.candidates_token_count)
 
-    if not function_responses:
-        raise Exception("no function responses generated, exiting.")
+        for candidate in response.candidates:
+            messages.append(candidate.content)
+
+        if not response.function_calls and response.text:
+            return response.text
+
+        function_responses = []
+        for function_call_part in response.function_calls:
+            function_call_result = call_function(function_call_part, verbose)
+            if verbose and function_call_result.parts[0].function_response.response:
+                print(f"-> {function_call_result.parts[0].function_response.response}")
+            function_responses.append(function_call_result.parts[0])
+
+        if len(function_responses) > 0:
+            messages.append(types.Content(role="user", parts=function_responses))
+
+        return None
+
+    except Exception as e:
+        return f"Error: generating AI content: {e}"
 
 
 if __name__ == "__main__":
